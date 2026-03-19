@@ -200,27 +200,72 @@ def pct_change(curr, prev):
 # DATA LOADERS — same format as monthly app
 # ══════════════════════════════════════════════════════════════════════════════
 def load_zomato(wb):
-    """Load Zomato data → {rid: {orders, complaints, kpt, rating, online_pct}}"""
+    """Load Zomato data → {rid: {orders, complaints, cmp_missing, cmp_quality,
+       cmp_wrong, cmp_packaging, kpt, rating, online_pct}}
+    Handles both:
+      - Single value col (daily): col index 6
+      - Multi day cols (weekly export): cols 6..N summed
+    """
     zmt = {}
     for sname in wb.sheetnames:
         if 'zomato' not in sname.lower(): continue
-        for row in wb[sname].iter_rows(min_row=2, values_only=True):
+        ws = wb[sname]
+        # Detect format: check if col headers row 1 has date objects beyond col 6
+        header = [cell.value for cell in ws[1]]
+        multi_day = sum(1 for h in header[6:] if h is not None) > 1
+
+        for row in ws.iter_rows(min_row=2, values_only=True):
             rid = safe_id(row[0])
             if not rid: continue
             metric = str(row[5]).strip() if row[5] else ''
-            val    = row[6]
+            if not metric: continue
+
+            # Value: sum all day columns for weekly, single col for daily
+            if multi_day:
+                vals = [safe_f(v) for v in row[6:] if v is not None]
+                val  = sum(vals) if vals else 0
+                # For averages (KPT, rating, online%) use mean not sum
+                avg_val = (sum(vals)/len(vals)) if vals else None
+            else:
+                val     = row[6]
+                avg_val = val
+
             if rid not in zmt:
-                zmt[rid] = {'orders':0,'complaints':0,'kpt':None,'rating':None,'online_pct':None}
-            if   metric == 'Delivered orders':   zmt[rid]['orders']     = safe_f(val)
-            elif metric == 'Total complaints':   zmt[rid]['complaints'] = safe_f(val)
-            elif metric == 'KPT (in minutes)':   zmt[rid]['kpt']        = safe_f(val) if val else None
-            elif metric == 'Average rating':     zmt[rid]['rating']     = safe_f(val) if val else None
-            elif metric == 'Online %':           zmt[rid]['online_pct'] = parse_pct(val)
+                zmt[rid] = {
+                    'orders':0,'complaints':0,
+                    'cmp_missing':0,'cmp_quality':0,
+                    'cmp_wrong':0,'cmp_packaging':0,
+                    'kpt':None,'rating':None,'online_pct':None
+                }
+
+            if   metric == 'Delivered orders':
+                zmt[rid]['orders']        = safe_f(val)
+            elif metric == 'Total complaints':
+                zmt[rid]['complaints']    = safe_f(val)
+            elif metric == 'Total complaints - Missing items':
+                zmt[rid]['cmp_missing']   = safe_f(val)
+            elif metric == 'Total complaints - Poor quality':
+                zmt[rid]['cmp_quality']   = safe_f(val)
+            elif metric == 'Total complaints - Wrong order':
+                zmt[rid]['cmp_wrong']     = safe_f(val)
+            elif metric == 'Total complaints - Poor packaging':
+                zmt[rid]['cmp_packaging'] = safe_f(val)
+            elif metric == 'KPT (in minutes)':
+                v = safe_f(avg_val) if avg_val else None
+                if v and v > 0: zmt[rid]['kpt'] = v
+            elif metric == 'Average rating':
+                v = safe_f(avg_val) if avg_val else None
+                if v and v > 0: zmt[rid]['rating'] = v
+            elif metric == 'Online %':
+                zmt[rid]['online_pct'] = parse_pct(avg_val)
         break
     return zmt
 
 def load_swiggy(wb):
-    """Load Swiggy data → {rid: {orders, kpt, avail, cmp_pct, rating}}"""
+    """Load Swiggy data → {rid: {orders, kpt, avail, cmp_pct, cmp_count,
+       cmp_missing, cmp_quality, cmp_wrong, cmp_packaging, rating}}
+    Handles both daily (single col) and weekly (single aggregated col) formats.
+    """
     swg = {}
     for sname in wb.sheetnames:
         if 'swiggy' not in sname.lower(): continue
@@ -229,21 +274,84 @@ def load_swiggy(wb):
             if not rid: continue
             metric = str(row[5]).strip() if row[5] else ''
             val    = row[6]
+            if not metric: continue
             if rid not in swg:
-                swg[rid] = {'orders':0,'kpt':None,'avail':None,'cmp_pct':None,'rating':None}
+                swg[rid] = {
+                    'orders':0,'kpt':None,'avail':None,
+                    'cmp_pct':None,'cmp_count':0,
+                    'cmp_missing':0,'cmp_quality':0,
+                    'cmp_wrong':0,'cmp_packaging':0,
+                    'rating':None
+                }
             if   metric in ('Delivered Orders','Orders'):
-                swg[rid]['orders']  = safe_f(val)
+                swg[rid]['orders']       = safe_f(val)
             elif metric == 'Avg Prep Time':
                 v = parse_min(val)
                 if v and v > 0: swg[rid]['kpt'] = v
             elif metric == 'Online Availability %':
-                swg[rid]['avail']   = parse_pct(val)
+                swg[rid]['avail']        = parse_pct(val)
             elif metric == '% Orders with Complaints':
-                swg[rid]['cmp_pct'] = parse_pct(val)
+                swg[rid]['cmp_pct']      = parse_pct(val)
+            elif metric == 'Non-refunded Complaints':
+                swg[rid]['cmp_count']    = safe_f(val)
+            elif metric == 'Missing Items':
+                swg[rid]['cmp_missing']  = safe_f(val)
+            elif metric == 'Quality Issues':
+                swg[rid]['cmp_quality']  = safe_f(val)
+            elif metric == 'Wrong Items':
+                swg[rid]['cmp_wrong']    = safe_f(val)
+            elif metric == 'Packaging & Spillage':
+                swg[rid]['cmp_packaging']= safe_f(val)
             elif metric in ('Rating','Average Rating'):
-                swg[rid]['rating']  = safe_f(val) if val else None
+                v = safe_f(val) if val else None
+                if v and v > 0: swg[rid]['rating'] = v
         break
     return swg
+
+
+def load_petpooja(wb):
+    """Load PetPooja → {outlet_name: {bills, net_sales}} from Sub-Order Wise report.
+    Matches by outlet name substring. Returns aggregated by platform too.
+    """
+    pp = {}
+    for sname in wb.sheetnames:
+        if sname.lower() not in ('petpooja','sheet3','petpooja '): continue
+        ws = wb[sname]
+        current_outlet = None
+        for row in ws.iter_rows(min_row=1, values_only=True):
+            if not any(v is not None for v in row): continue
+            name = str(row[0]).strip() if row[0] else ''
+            if name in ('', 'Total', 'Sub Total', 'Date:', 'Name:', 'Restaurants'):
+                continue
+            # Header row
+            if name == 'Restaurants' or 'Restaurants' in name: continue
+            # Detect outlet block — col0 has name, col1 has order type
+            order_type = str(row[1]).strip() if row[1] else ''
+            bills      = safe_f(row[3]) if row[3] is not None else 0
+            net_sales  = safe_f(row[6]) if row[6] is not None else 0
+
+            if name and order_type:  # new outlet row
+                current_outlet = name
+                if current_outlet not in pp:
+                    pp[current_outlet] = {'bills':0, 'net_sales':0,
+                                          'zomato_bills':0, 'swiggy_bills':0,
+                                          'pickup_bills':0}
+                pp[current_outlet]['bills']     += bills
+                pp[current_outlet]['net_sales'] += net_sales
+                sub = str(row[2]).strip().lower() if row[2] else ''
+                if 'zomato' in sub:   pp[current_outlet]['zomato_bills']  += bills
+                elif 'swiggy' in sub: pp[current_outlet]['swiggy_bills']  += bills
+                elif 'pick' in order_type.lower(): pp[current_outlet]['pickup_bills'] += bills
+            elif not name and current_outlet and order_type:
+                # Continuation row for same outlet
+                pp[current_outlet]['bills']     += bills
+                pp[current_outlet]['net_sales'] += net_sales
+                sub = str(row[2]).strip().lower() if row[2] else ''
+                if 'zomato' in sub:   pp[current_outlet]['zomato_bills']  += bills
+                elif 'swiggy' in sub: pp[current_outlet]['swiggy_bills']  += bills
+                elif 'pick' in order_type.lower(): pp[current_outlet]['pickup_bills'] += bills
+        break
+    return pp
 
 def detect_file(file_bytes):
     try:
@@ -260,59 +368,95 @@ def detect_file(file_bytes):
 # ══════════════════════════════════════════════════════════════════════════════
 # CALCULATOR — per outlet metrics from raw data
 # ══════════════════════════════════════════════════════════════════════════════
-def calc_outlet_metrics(outlet, zmt, swg):
-    """Return dict of metrics for one outlet"""
+def calc_outlet_metrics(outlet, zmt, swg, pp=None):
+    """Return dict of metrics for one outlet including complaint cohorts"""
     z_rk = outlet.get('zmt_rk')
     s_rk = outlet.get('swg_rk')
 
-    # Orders
+    # ── Orders ────────────────────────────────────────────────────────────────
     z_orders = zmt.get(z_rk, {}).get('orders', 0) if z_rk else 0
     s_orders = swg.get(s_rk, {}).get('orders', 0)  if s_rk else 0
-    total_orders = z_orders + s_orders
+    online_orders = z_orders + s_orders
 
-    # Complaints — Zomato raw count + Swiggy back-calc from %
-    z_comps = zmt.get(z_rk, {}).get('complaints', 0) if z_rk else 0
-    s_cmp_pct = swg.get(s_rk, {}).get('cmp_pct') if s_rk else None
-    s_comps = round(s_cmp_pct / 100 * s_orders) if (s_cmp_pct and s_orders > 0) else 0
-    total_comps = z_comps + s_comps
-    cmp_pct = round(total_comps / total_orders * 100, 2) if total_orders > 0 else None
+    # PetPooja total (online + pickup)
+    pp_data    = None
+    pp_bills   = None
+    pp_sales   = None
+    if pp:
+        # Match outlet name to PetPooja key
+        for k, v in pp.items():
+            if outlet['outlet'].lower().replace(' ','') in k.lower().replace(' ','') or \
+               k.lower().replace(' ','') in outlet['outlet'].lower().replace(' ',''):
+                pp_data  = v
+                pp_bills = v['bills']
+                pp_sales = v['net_sales']
+                break
 
-    # KPT — Zomato RK only (confirmed from analysis)
+    # ── Complaints — Zomato (raw counts) + Swiggy (back-calc from %) ─────────
+    z_comps     = zmt.get(z_rk, {}).get('complaints',   0) if z_rk else 0
+    z_missing   = zmt.get(z_rk, {}).get('cmp_missing',  0) if z_rk else 0
+    z_quality   = zmt.get(z_rk, {}).get('cmp_quality',  0) if z_rk else 0
+    z_wrong     = zmt.get(z_rk, {}).get('cmp_wrong',    0) if z_rk else 0
+    z_packaging = zmt.get(z_rk, {}).get('cmp_packaging',0) if z_rk else 0
+
+    s_cmp_pct   = swg.get(s_rk, {}).get('cmp_pct')    if s_rk else None
+    s_comps     = round(s_cmp_pct / 100 * s_orders) if (s_cmp_pct and s_orders > 0) else 0
+    s_missing   = swg.get(s_rk, {}).get('cmp_missing',  0) if s_rk else 0
+    s_quality   = swg.get(s_rk, {}).get('cmp_quality',  0) if s_rk else 0
+    s_wrong     = swg.get(s_rk, {}).get('cmp_wrong',    0) if s_rk else 0
+    s_packaging = swg.get(s_rk, {}).get('cmp_packaging',0) if s_rk else 0
+
+    total_comps   = z_comps   + s_comps
+    total_missing = z_missing + s_missing
+    total_quality = z_quality + s_quality
+    total_wrong   = z_wrong   + s_wrong
+    total_pkg     = z_packaging + s_packaging
+    cmp_pct = round(total_comps / online_orders * 100, 2) if online_orders > 0 else None
+
+    # ── KPT — Zomato RK only (confirmed) ─────────────────────────────────────
     z_kpt = zmt.get(z_rk, {}).get('kpt') if z_rk else None
-    kpt = round(z_kpt, 2) if (z_kpt and z_kpt > 0) else None
+    kpt   = round(z_kpt, 2) if (z_kpt and z_kpt > 0) else None
 
-    # Rating — Zomato primary, Swiggy fallback
+    # ── Rating — Zomato primary, Swiggy fallback ──────────────────────────────
     z_rat = zmt.get(z_rk, {}).get('rating') if z_rk else None
-    s_rat = swg.get(s_rk, {}).get('rating')  if s_rk else None
-    rats = [r for r in [z_rat, s_rat] if r and r > 0]
-    rating = round(sum(rats)/len(rats), 2) if rats else None
-    rating_src = "Zomato+Swiggy" if len(rats)==2 else ("Zomato" if z_rat else ("Swiggy" if s_rat else "N/A"))
+    s_rat = swg.get(s_rk, {}).get('rating') if s_rk else None
+    rats  = [r for r in [z_rat, s_rat] if r and r > 0]
+    rating     = round(sum(rats)/len(rats), 2) if rats else None
+    rating_src = "Z+S" if len(rats)==2 else ("Zomato" if z_rat else ("Swiggy" if s_rat else "N/A"))
 
-    # Availability
+    # ── Availability ──────────────────────────────────────────────────────────
     z_avail = zmt.get(z_rk, {}).get('online_pct') if z_rk else None
     s_avail = swg.get(s_rk, {}).get('avail')       if s_rk else None
     avails  = [a for a in [z_avail, s_avail] if a is not None]
     avail   = round(sum(avails)/len(avails), 2) if avails else None
 
+    has_data = (online_orders > 0 or kpt is not None or rating is not None)
+
     return {
-        'orders':       total_orders,
-        'z_orders':     z_orders,
-        's_orders':     s_orders,
-        'total_comps':  total_comps,
-        'cmp_pct':      cmp_pct,
-        'kpt':          kpt,
-        'kpt_breach':   (1 if kpt and kpt > 12 else 0) if kpt is not None else None,
-        'rating':       rating,
-        'rating_src':   rating_src,
-        'avail':        avail,
-        'has_data':     (total_orders > 0 or kpt is not None or rating is not None),
+        'orders':         online_orders,
+        'z_orders':       z_orders,
+        's_orders':       s_orders,
+        'pp_bills':       pp_bills,
+        'pp_sales':       pp_sales,
+        'total_comps':    total_comps,
+        'cmp_pct':        cmp_pct,
+        'cmp_missing':    total_missing,
+        'cmp_quality':    total_quality,
+        'cmp_wrong':      total_wrong,
+        'cmp_packaging':  total_pkg,
+        'kpt':            kpt,
+        'kpt_breach':     (1 if kpt and kpt > 12 else 0) if kpt is not None else None,
+        'rating':         rating,
+        'rating_src':     rating_src,
+        'avail':          avail,
+        'has_data':       has_data,
     }
 
-def calc_city_summary(city, outlets, zmt, swg):
+def calc_city_summary(city, outlets, zmt, swg, pp=None):
     """Aggregate metrics across all outlets in a city"""
     rows = []
     for o in outlets:
-        m = calc_outlet_metrics(o, zmt, swg)
+        m = calc_outlet_metrics(o, zmt, swg, pp)
         m['outlet'] = o['outlet']
         rows.append(m)
 
@@ -320,26 +464,39 @@ def calc_city_summary(city, outlets, zmt, swg):
     if not active:
         return None, rows
 
-    total_orders = sum(r['orders'] for r in active)
-    total_comps  = sum(r['total_comps'] for r in active)
-    cmp_pct      = round(total_comps / total_orders * 100, 2) if total_orders > 0 else None
+    total_orders   = sum(r['orders']      for r in active)
+    total_comps    = sum(r['total_comps'] for r in active)
+    cmp_missing    = sum(r['cmp_missing'] for r in active)
+    cmp_quality    = sum(r['cmp_quality'] for r in active)
+    cmp_wrong      = sum(r['cmp_wrong']   for r in active)
+    cmp_packaging  = sum(r['cmp_packaging'] for r in active)
+    cmp_pct        = round(total_comps / total_orders * 100, 2) if total_orders > 0 else None
+
+    pp_bills  = sum(r['pp_bills']  for r in active if r['pp_bills'])
+    pp_sales  = sum(r['pp_sales']  for r in active if r['pp_sales'])
 
     kpt_vals     = [r['kpt'] for r in active if r['kpt'] is not None]
     avg_kpt      = round(sum(kpt_vals)/len(kpt_vals), 2) if kpt_vals else None
     kpt_breaches = sum(1 for r in active if r['kpt'] and r['kpt'] > 12)
 
-    rat_vals     = [r['rating'] for r in active if r['rating'] is not None]
-    avg_rating   = round(sum(rat_vals)/len(rat_vals), 2) if rat_vals else None
+    rat_vals   = [r['rating'] for r in active if r['rating'] is not None]
+    avg_rating = round(sum(rat_vals)/len(rat_vals), 2) if rat_vals else None
 
     return {
-        'city':         city,
-        'outlets':      len(active),
-        'total_orders': total_orders,
-        'total_comps':  total_comps,
-        'cmp_pct':      cmp_pct,
-        'avg_kpt':      avg_kpt,
-        'kpt_breaches': kpt_breaches,
-        'avg_rating':   avg_rating,
+        'city':          city,
+        'outlets':       len(active),
+        'total_orders':  total_orders,
+        'total_comps':   total_comps,
+        'cmp_pct':       cmp_pct,
+        'cmp_missing':   cmp_missing,
+        'cmp_quality':   cmp_quality,
+        'cmp_wrong':     cmp_wrong,
+        'cmp_packaging': cmp_packaging,
+        'avg_kpt':       avg_kpt,
+        'kpt_breaches':  kpt_breaches,
+        'avg_rating':    avg_rating,
+        'pp_bills':      pp_bills or None,
+        'pp_sales':      pp_sales or None,
     }, rows
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -365,172 +522,235 @@ def data_cell(ws, row, col, val, bg="0f0f0f", fg="f0f0f0", sz=9, bold=False, cen
 
 def build_excel_report(summaries_curr, summaries_prev, outlet_detail,
                         report_type, label_curr, label_prev):
-    wb = openpyxl.Workbook()
+    wb  = openpyxl.Workbook()
+    RED = "f87171"; GREEN = "4ade80"; GOLD = "e8a020"
+    DARK = "0f0f0f"; ALT = "111111"
+
+    def val(d, k): return d.get(k) if d else None
 
     # ── Sheet 1: City Summary ─────────────────────────────────────────────────
-    ws1 = wb.active
-    ws1.title = "City Summary"
+    ws1 = wb.active; ws1.title = "City Summary"
     ws1.sheet_view.showGridLines = False
 
-    title = f"RollsKing — {report_type} Operations Report | {label_curr} vs {label_prev}"
-    ws1.merge_cells("A1:O1")
+    NCOLS = 19
+    ws1.merge_cells(f"A1:{get_column_letter(NCOLS)}1")
     c = ws1["A1"]
-    c.value     = title
-    c.font      = Font(bold=True, size=13, color="e8a020", name="Arial")
-    c.fill      = PatternFill("solid", start_color="0a0a0a")
+    c.value = f"RollsKing — {report_type} Operations Report | {label_curr} vs {label_prev}"
+    c.font = Font(bold=True, size=13, color=GOLD, name="Arial")
+    c.fill = PatternFill("solid", start_color="0a0a0a")
     c.alignment = Alignment(horizontal="center", vertical="center")
     ws1.row_dimensions[1].height = 28
 
-    ws1.merge_cells("A2:O2")
+    ws1.merge_cells(f"A2:{get_column_letter(NCOLS)}2")
     c = ws1["A2"]
-    c.value     = f"Generated: {datetime.now().strftime('%d %b %Y, %H:%M')}  |  Current: {label_curr}  |  Previous: {label_prev}"
-    c.font      = Font(size=8, color="555555", italic=True, name="Arial")
-    c.fill      = PatternFill("solid", start_color="0f0f0f")
+    c.value = f"Generated: {datetime.now().strftime('%d %b %Y, %H:%M')}  |  {label_curr} vs {label_prev}"
+    c.font = Font(size=8, color="555555", italic=True, name="Arial")
+    c.fill = PatternFill("solid", start_color="0f0f0f")
     c.alignment = Alignment(horizontal="center", vertical="center")
-    ws1.row_dimensions[2].height = 16
+    ws1.row_dimensions[2].height = 14
 
-    # Group headers
-    hdr_groups = [
-        ("A3:A4", "City / Manager"),
-        ("B3:B4", "Outlets"),
-        ("C3:E3", "Orders"),
-        ("F3:H3", "Complaints"),
-        ("I3:K3", "KPT (min)"),
-        ("L3:N3", "Rating"),
+    # Group headers row 3
+    groups = [
+        ("A3:A4","City / Manager"),("B3:B4","Outlets"),
+        ("C3:D3","Orders"),("E3:F3","PetPooja"),
+        ("G3:J3","Complaints"),("K3:M3","Complaint Type Breakdown"),
+        ("N3:P3","KPT (min)"),("Q3:S3","Rating"),
     ]
-    for span, text in hdr_groups:
+    for span, text in groups:
         ws1.merge_cells(span)
         c = ws1[span.split(":")[0]]
-        c.value     = text
-        c.font      = Font(bold=True, color="e8a020", size=9, name="Arial")
-        c.fill      = PatternFill("solid", start_color="1a1a1a")
+        c.value = text
+        c.font  = Font(bold=True, color=GOLD, size=9, name="Arial")
+        c.fill  = PatternFill("solid", start_color="1a1a1a")
         c.alignment = Alignment(horizontal="center", vertical="center")
-        c.border    = thin_border()
+        c.border = thin_border()
 
-    sub_hdrs = {3: label_curr, 4: label_prev, 5: "Δ%",
-                6: label_curr, 7: label_prev, 8: "Δ (pp)",
-                9: label_curr, 10: label_prev, 11: "Breaches",
-                12: label_curr, 13: label_prev, 14: "Δ"}
-    for i in range(3, 15):  # skip cols 1,2 — already merged from row 3
-        h = sub_hdrs.get(i, "")
-        hdr_cell(ws1, 4, i, h, bg="141414", fg="aaaaaa", sz=8)
-    ws1.row_dimensions[3].height = 18
-    ws1.row_dimensions[4].height = 16
+    # Sub-headers row 4 (skip cols 1,2 — merged A3:A4 and B3:B4)
+    sub = {
+        3:label_curr, 4:label_prev,
+        5:"Bills",     6:"Net Sales",
+        7:"Cmp%\n"+label_curr, 8:"Cmp%\n"+label_prev, 9:"Δ(pp)", 10:"Count",
+        11:"Missing",  12:"Quality", 13:"Wrong+Pack",
+        14:label_curr, 15:label_prev, 16:"Breaches",
+        17:label_curr, 18:label_prev, 19:"Δ",
+    }
+    for i in range(3, NCOLS+1):
+        hdr_cell(ws1, 4, i, sub.get(i,""), bg="141414", fg="aaaaaa", sz=8)
+    ws1.row_dimensions[3].height = 18; ws1.row_dimensions[4].height = 22
 
-    col_w = [28,8,12,12,10, 10,10,10, 10,10,10, 10,10,10]
-    for i, w in enumerate(col_w, 1):
+    col_ws = [28,7,11,11,10,12, 11,11,9,9, 9,9,11, 10,10,10, 10,10,8]
+    for i, w in enumerate(col_ws, 1):
         ws1.column_dimensions[get_column_letter(i)].width = w
-
-    GOLD  = "e8a020"
-    RED   = "f87171"
-    GREEN = "4ade80"
-    DARK  = "0f0f0f"
-    ALT   = "111111"
 
     for i, city in enumerate(summaries_curr.keys()):
         row  = i + 5
-        curr = summaries_curr.get(city)
-        prev = summaries_prev.get(city)
+        curr = summaries_curr.get(city, {})
+        prev = summaries_prev.get(city, {})
         bg   = ALT if i % 2 else DARK
 
-        def val(d, k): return d.get(k) if d else None
+        c_ord = val(curr,'total_orders');  p_ord = val(prev,'total_orders')
+        d_ord = pct_change(c_ord, p_ord)
+        c_cmp = val(curr,'cmp_pct');       p_cmp = val(prev,'cmp_pct')
+        d_cmp = round(c_cmp-p_cmp,2) if (c_cmp and p_cmp) else None
+        c_cnt = val(curr,'total_comps')
+        c_mis = val(curr,'cmp_missing');   c_qua = val(curr,'cmp_quality')
+        c_wrg = val(curr,'cmp_wrong');     c_pkg = val(curr,'cmp_packaging')
+        c_kpt = val(curr,'avg_kpt');       p_kpt = val(prev,'avg_kpt')
+        c_kpb = val(curr,'kpt_breaches')
+        c_rat = val(curr,'avg_rating');    p_rat = val(prev,'avg_rating')
+        d_rat = round(c_rat-p_rat,2) if (c_rat and p_rat) else None
+        c_pp_b = val(curr,'pp_bills');     c_pp_s = val(curr,'pp_sales')
+
+        data_cell(ws1,row,1,city,bg=bg,fg="ffffff",bold=True,center=False)
+        data_cell(ws1,row,2,val(curr,'outlets') or "—",bg=bg)
 
         # Orders
-        c_ord = val(curr,'total_orders'); p_ord = val(prev,'total_orders')
-        d_ord = pct_change(c_ord, p_ord)
+        data_cell(ws1,row,3,c_ord,bg=bg)
+        fg_o = GREEN if (d_ord and d_ord>0) else (RED if d_ord and d_ord<0 else "555555")
+        data_cell(ws1,row,4,f"{p_ord}" if p_ord else "—",bg=bg,fg="555555")
+        # PetPooja
+        data_cell(ws1,row,5,c_pp_b if c_pp_b else "—",bg=bg)
+        data_cell(ws1,row,6,f"₹{c_pp_s:,.0f}" if c_pp_s else "—",bg=bg)
 
         # Complaints
-        c_cmp = val(curr,'cmp_pct'); p_cmp = val(prev,'cmp_pct')
-        d_cmp = round(c_cmp - p_cmp, 2) if (c_cmp and p_cmp) else None
+        fg_c = RED if (c_cmp and c_cmp>=3) else (GREEN if c_cmp and c_cmp<2 else "f0f0f0")
+        data_cell(ws1,row,7, f"{c_cmp:.2f}%" if c_cmp else "—",bg=bg,fg=fg_c)
+        data_cell(ws1,row,8, f"{p_cmp:.2f}%" if p_cmp else "—",bg=bg,fg="555555")
+        fg_dc = GREEN if (d_cmp and d_cmp<0) else (RED if d_cmp and d_cmp>0 else "555555")
+        data_cell(ws1,row,9, f"{d_cmp:+.2f}" if d_cmp is not None else "—",bg=bg,fg=fg_dc)
+        data_cell(ws1,row,10,c_cnt if c_cnt else "—",bg=bg)
+
+        # Cohorts
+        data_cell(ws1,row,11,c_mis if c_mis else "—",bg=bg,fg=RED if c_mis and c_mis>0 else "555555")
+        data_cell(ws1,row,12,c_qua if c_qua else "—",bg=bg,fg=RED if c_qua and c_qua>0 else "555555")
+        wrg_pkg = (c_wrg or 0) + (c_pkg or 0)
+        data_cell(ws1,row,13,wrg_pkg if wrg_pkg else "—",bg=bg,fg=RED if wrg_pkg>0 else "555555")
 
         # KPT
-        c_kpt = val(curr,'avg_kpt'); p_kpt = val(prev,'avg_kpt')
-        c_kpb = val(curr,'kpt_breaches')
+        fg_k = RED if (c_kpt and c_kpt>12) else (GREEN if c_kpt and c_kpt<=10 else "f0f0f0")
+        data_cell(ws1,row,14,f"{c_kpt:.1f}" if c_kpt else "—",bg=bg,fg=fg_k)
+        data_cell(ws1,row,15,f"{p_kpt:.1f}" if p_kpt else "—",bg=bg,fg="555555")
+        fg_kb = RED if (c_kpb and c_kpb>0) else GREEN
+        data_cell(ws1,row,16,c_kpb if c_kpb is not None else "—",bg=bg,fg=fg_kb)
 
         # Rating
-        c_rat = val(curr,'avg_rating'); p_rat = val(prev,'avg_rating')
-        d_rat = round(c_rat - p_rat, 2) if (c_rat and p_rat) else None
-
-        data_cell(ws1, row, 1,  city,  bg=bg, fg="ffffff", bold=True, center=False)
-        data_cell(ws1, row, 2,  val(curr,'outlets') or "—", bg=bg)
-        data_cell(ws1, row, 3,  c_ord, bg=bg)
-        data_cell(ws1, row, 4,  p_ord, bg=bg, fg="555555")
-        fg_d = GREEN if (d_ord and d_ord > 0) else (RED if d_ord and d_ord < 0 else "555555")
-        data_cell(ws1, row, 5,  f"{d_ord:+.1f}%" if d_ord is not None else "—", bg=bg, fg=fg_d)
-
-        # Complaints — red if high
-        fg_c = RED if (c_cmp and c_cmp >= 3) else (GREEN if c_cmp and c_cmp < 2 else "f0f0f0")
-        data_cell(ws1, row, 6,  f"{c_cmp:.2f}%" if c_cmp else "—", bg=bg, fg=fg_c)
-        data_cell(ws1, row, 7,  f"{p_cmp:.2f}%" if p_cmp else "—", bg=bg, fg="555555")
-        fg_dc = GREEN if (d_cmp and d_cmp < 0) else (RED if d_cmp and d_cmp > 0 else "555555")
-        data_cell(ws1, row, 8,  f"{d_cmp:+.2f}" if d_cmp is not None else "—", bg=bg, fg=fg_dc)
-
-        # KPT — red if > 12
-        fg_k = RED if (c_kpt and c_kpt > 12) else (GREEN if c_kpt and c_kpt <= 10 else "f0f0f0")
-        data_cell(ws1, row, 9,  f"{c_kpt:.1f}" if c_kpt else "—", bg=bg, fg=fg_k)
-        data_cell(ws1, row, 10, f"{p_kpt:.1f}" if p_kpt else "—", bg=bg, fg="555555")
-        fg_kb = RED if (c_kpb and c_kpb > 0) else GREEN
-        data_cell(ws1, row, 11, c_kpb if c_kpb is not None else "—", bg=bg, fg=fg_kb)
-
-        # Rating — red if < 4
-        fg_r = RED if (c_rat and c_rat < 4.0) else (GREEN if c_rat and c_rat >= 4.3 else "f0f0f0")
-        data_cell(ws1, row, 12, f"{c_rat:.2f}" if c_rat else "—", bg=bg, fg=fg_r)
-        data_cell(ws1, row, 13, f"{p_rat:.2f}" if p_rat else "—", bg=bg, fg="555555")
-        fg_dr = GREEN if (d_rat and d_rat > 0) else (RED if d_rat and d_rat < 0 else "555555")
-        data_cell(ws1, row, 14, f"{d_rat:+.2f}" if d_rat is not None else "—", bg=bg, fg=fg_dr)
+        fg_r = RED if (c_rat and c_rat<4.0) else (GREEN if c_rat and c_rat>=4.3 else "f0f0f0")
+        data_cell(ws1,row,17,f"{c_rat:.2f}" if c_rat else "—",bg=bg,fg=fg_r)
+        data_cell(ws1,row,18,f"{p_rat:.2f}" if p_rat else "—",bg=bg,fg="555555")
+        fg_dr = GREEN if (d_rat and d_rat>0) else (RED if d_rat and d_rat<0 else "555555")
+        data_cell(ws1,row,19,f"{d_rat:+.2f}" if d_rat is not None else "—",bg=bg,fg=fg_dr)
         ws1.row_dimensions[row].height = 16
 
-    # ── Sheet 2: Outlet Detail ────────────────────────────────────────────────
+    # ── Sheet 2: Outlet Detail with cohorts ───────────────────────────────────
     ws2 = wb.create_sheet("Outlet Detail")
     ws2.sheet_view.showGridLines = False
-    ws2.merge_cells("A1:L1")
+    ws2.merge_cells("A1:R1")
     c = ws2["A1"]
-    c.value     = f"Outlet Detail — {label_curr} vs {label_prev}"
-    c.font      = Font(bold=True, size=12, color="e8a020", name="Arial")
-    c.fill      = PatternFill("solid", start_color="0a0a0a")
+    c.value = f"Outlet Detail — {label_curr} vs {label_prev}"
+    c.font  = Font(bold=True, size=12, color=GOLD, name="Arial")
+    c.fill  = PatternFill("solid", start_color="0a0a0a")
     c.alignment = Alignment(horizontal="center", vertical="center")
     ws2.row_dimensions[1].height = 22
 
-    od_hdrs = ["City/Manager","Outlet","Orders","Complaints","Cmp %","KPT (min)","KPT Breach","Rating","Avail %","vs Prev Orders","vs Prev Cmp%","vs Prev Rating"]
+    od_hdrs = [
+        "City/Manager","Outlet",
+        "Online Orders","Zomato","Swiggy","PetPooja Bills","Net Sales",
+        "Total Comps","Cmp %","Missing","Quality","Wrong","Packaging",
+        "KPT (min)","KPT?",
+        "Rating","Avail %",
+        "vs Prev Orders","vs Prev Cmp%",
+    ]
     for i, h in enumerate(od_hdrs, 1):
         hdr_cell(ws2, 2, i, h)
     ws2.row_dimensions[2].height = 20
 
-    for col_l, w in zip([get_column_letter(i) for i in range(1,13)],
-                         [24,22,10,12,10,10,10,10,10,12,12,12]):
-        ws2.column_dimensions[col_l].width = w
+    col_ws2 = [22,20,12,10,10,12,14, 10,10,9,9,9,10, 10,8, 10,10, 12,12]
+    for i, w in enumerate(col_ws2, 1):
+        ws2.column_dimensions[get_column_letter(i)].width = w
 
     row_num = 3
     for city, rows in outlet_detail.items():
+        if city.startswith('_prev_'): continue
         prev_rows = {r['outlet']: r for r in outlet_detail.get(f"_prev_{city}", [])}
         for r in rows:
             bg = ALT if row_num % 2 else DARK
             pr = prev_rows.get(r['outlet'], {})
             d_ord = pct_change(r.get('orders'), pr.get('orders'))
-            d_cmp = round(r['cmp_pct'] - pr['cmp_pct'], 2) if (r.get('cmp_pct') and pr.get('cmp_pct')) else None
-            d_rat = round(r['rating'] - pr['rating'], 2) if (r.get('rating') and pr.get('rating')) else None
+            d_cmp = round(r['cmp_pct']-pr['cmp_pct'],2) if (r.get('cmp_pct') and pr.get('cmp_pct')) else None
+            kpt_flag = "❌" if r.get('kpt_breach') else ("✓" if r.get('kpt') is not None else "—")
 
             vals = [
-                city, r['outlet'],
+                city.split('(')[0].strip(), r['outlet'],
                 r.get('orders') or "—",
+                r.get('z_orders') or "—", r.get('s_orders') or "—",
+                r.get('pp_bills') or "—",
+                f"₹{r['pp_sales']:,.0f}" if r.get('pp_sales') else "—",
                 r.get('total_comps') or "—",
                 f"{r['cmp_pct']:.2f}%" if r.get('cmp_pct') else "—",
+                r.get('cmp_missing') or "—",
+                r.get('cmp_quality') or "—",
+                r.get('cmp_wrong')   or "—",
+                r.get('cmp_packaging') or "—",
                 f"{r['kpt']:.1f}" if r.get('kpt') else "—",
-                "YES" if r.get('kpt_breach') else ("—" if r.get('kpt') is None else "OK"),
+                kpt_flag,
                 f"{r['rating']:.2f}" if r.get('rating') else "—",
                 f"{r['avail']:.1f}%" if r.get('avail') else "—",
                 f"{d_ord:+.1f}%" if d_ord is not None else "—",
                 f"{d_cmp:+.2f}" if d_cmp is not None else "—",
-                f"{d_rat:+.2f}" if d_rat is not None else "—",
             ]
-            for col, val in enumerate(vals, 1):
-                fg = "ffffff"
-                if col == 7 and val == "YES": fg = RED
-                if col == 7 and val == "OK":  fg = GREEN
-                if col == 8 and r.get('rating') and r['rating'] < 4.0: fg = RED
-                data_cell(ws2, row_num, col, val, bg=bg, fg=fg,
-                          center=(col != 2), bold=(col == 2))
+            for col, v in enumerate(vals, 1):
+                fg = "f0f0f0"
+                if col == 15:
+                    fg = RED if v == "❌" else (GREEN if v == "✓" else "555555")
+                if col == 9 and r.get('cmp_pct') and r['cmp_pct'] >= 3: fg = RED
+                if col == 16 and r.get('rating') and r['rating'] < 4.0: fg = RED
+                if col in (10,11,12,13) and v not in ("—","0"): fg = RED if v and v != "—" and safe_f(v)>0 else "555555"
+                data_cell(ws2, row_num, col, v, bg=bg, fg=fg,
+                          center=(col!=2), bold=(col==2))
             ws2.row_dimensions[row_num].height = 15
+            row_num += 1
+
+    # ── Sheet 3: Complaints Cohort Summary ────────────────────────────────────
+    ws3 = wb.create_sheet("Complaint Breakdown")
+    ws3.sheet_view.showGridLines = False
+    ws3.merge_cells("A1:H1")
+    c = ws3["A1"]
+    c.value = f"Complaint Breakdown by Type — {label_curr}"
+    c.font  = Font(bold=True, size=12, color=GOLD, name="Arial")
+    c.fill  = PatternFill("solid", start_color="0a0a0a")
+    c.alignment = Alignment(horizontal="center", vertical="center")
+    ws3.row_dimensions[1].height = 22
+
+    cmp_hdrs = ["City/Manager","Outlet","Total Comps","Cmp %","Missing Items","Quality Issues","Wrong Order","Packaging"]
+    for i, h in enumerate(cmp_hdrs, 1):
+        hdr_cell(ws3, 2, i, h)
+    ws3.row_dimensions[2].height = 20
+    for i, w in enumerate([22,22,12,10,14,14,14,12], 1):
+        ws3.column_dimensions[get_column_letter(i)].width = w
+
+    row_num = 3
+    for city, rows in outlet_detail.items():
+        if city.startswith('_prev_'): continue
+        for r in rows:
+            if not r.get('has_data'): continue
+            bg = ALT if row_num % 2 else DARK
+            total = r.get('total_comps', 0)
+            vals = [
+                city.split('(')[0].strip(), r['outlet'],
+                total or "—",
+                f"{r['cmp_pct']:.2f}%" if r.get('cmp_pct') else "—",
+                r.get('cmp_missing') or "—",
+                r.get('cmp_quality') or "—",
+                r.get('cmp_wrong')   or "—",
+                r.get('cmp_packaging') or "—",
+            ]
+            for col, v in enumerate(vals, 1):
+                fg = "f0f0f0"
+                if col == 4 and r.get('cmp_pct') and r['cmp_pct'] >= 3: fg = RED
+                if col in (5,6,7,8) and v not in ("—",0,"0") and safe_f(v)>0: fg = RED
+                data_cell(ws3, row_num, col, v, bg=bg, fg=fg,
+                          center=(col!=2), bold=(col==2))
+            ws3.row_dimensions[row_num].height = 15
             row_num += 1
 
     buf = io.BytesIO()
@@ -850,16 +1070,18 @@ def render_report_tab(report_type, label_curr_default, label_prev_default,
         with st.spinner("Processing..."):
             try:
                 # Load current
-                wb_curr = openpyxl.load_workbook(io.BytesIO(f_curr.read()), data_only=True)
+                wb_curr  = openpyxl.load_workbook(io.BytesIO(f_curr.read()), data_only=True)
                 zmt_curr = load_zomato(wb_curr)
                 swg_curr = load_swiggy(wb_curr)
+                pp_curr  = load_petpooja(wb_curr)
 
                 # Load previous
-                zmt_prev = {}; swg_prev = {}
+                zmt_prev = {}; swg_prev = {}; pp_prev = {}
                 if f_prev:
-                    wb_prev = openpyxl.load_workbook(io.BytesIO(f_prev.read()), data_only=True)
+                    wb_prev  = openpyxl.load_workbook(io.BytesIO(f_prev.read()), data_only=True)
                     zmt_prev = load_zomato(wb_prev)
                     swg_prev = load_swiggy(wb_prev)
+                    pp_prev  = load_petpooja(wb_prev)
 
                 # Calculate per city
                 summaries_curr = {}; summaries_prev = {}
@@ -867,13 +1089,13 @@ def render_report_tab(report_type, label_curr_default, label_prev_default,
 
                 for city in active_cities:
                     outlets = CITY_MAPPING[city]
-                    summ, rows = calc_city_summary(city, outlets, zmt_curr, swg_curr)
+                    summ, rows = calc_city_summary(city, outlets, zmt_curr, swg_curr, pp_curr)
                     if summ:
                         summaries_curr[city] = summ
                         outlet_detail[city]  = rows
 
                     if f_prev:
-                        summ_p, rows_p = calc_city_summary(city, outlets, zmt_prev, swg_prev)
+                        summ_p, rows_p = calc_city_summary(city, outlets, zmt_prev, swg_prev, pp_prev)
                         if summ_p:
                             summaries_prev[city] = summ_p
                             outlet_detail[f"_prev_{city}"] = rows_p
@@ -924,13 +1146,18 @@ def render_report_tab(report_type, label_curr_default, label_prev_default,
                     kpt_flag = "🔴" if curr.get('kpt_breaches') and curr['kpt_breaches'] > 0 else "🟢"
                     rat_flag = "🔴" if (curr.get('avg_rating') and curr['avg_rating'] < 4.0) else "🟢"
                     table_rows.append({
-                        "City": city.split('(')[0].strip(),
-                        "Orders": curr.get('total_orders','—'),
-                        f"Cmp% {label_curr}": f"{cmp_flag} {curr['cmp_pct']:.2f}%" if curr.get('cmp_pct') else "—",
-                        "Cmp Δ": f"{d_cmp:+.2f}pp" if d_cmp is not None else "—",
-                        f"KPT {label_curr}": f"{kpt_flag} {curr['avg_kpt']:.1f}m" if curr.get('avg_kpt') else "—",
-                        "KPT Breaches": curr.get('kpt_breaches','—'),
-                        f"Rating {label_curr}": f"{rat_flag} {curr['avg_rating']:.2f}" if curr.get('avg_rating') else "—",
+                        "City":            city.split('(')[0].strip(),
+                        "Online Orders":   curr.get('total_orders','—'),
+                        "PP Bills":        curr.get('pp_bills','—'),
+                        "Net Sales":       f"₹{curr['pp_sales']:,.0f}" if curr.get('pp_sales') else "—",
+                        f"Cmp%":           f"{cmp_flag} {curr['cmp_pct']:.2f}%" if curr.get('cmp_pct') else "—",
+                        "Cmp Δ":           f"{d_cmp:+.2f}pp" if d_cmp is not None else "—",
+                        "Missing":         curr.get('cmp_missing','—'),
+                        "Quality":         curr.get('cmp_quality','—'),
+                        "Wrong+Pack":      (curr.get('cmp_wrong',0) or 0) + (curr.get('cmp_packaging',0) or 0) or "—",
+                        f"KPT":            f"{kpt_flag} {curr['avg_kpt']:.1f}m" if curr.get('avg_kpt') else "—",
+                        "Breaches":        curr.get('kpt_breaches','—'),
+                        f"Rating":         f"{rat_flag} {curr['avg_rating']:.2f}" if curr.get('avg_rating') else "—",
                     })
 
                 import pandas as pd
